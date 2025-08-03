@@ -6,6 +6,7 @@ import time
 import json
 import edlib
 import argparse
+import pandas as pd
 from Bio import SeqIO
 from Bio import pairwise2
 from tqdm import tqdm
@@ -107,12 +108,12 @@ def check_one_target(args, exact8_bonus=0.1):
     }
 
 # multi-process optimization
-def check_cross_parallel(query_seq, db_records, args, win=80, id_thresh=0.35, n_jobs=None):
+def check_cross_parallel(query_seq, db_records, win=80, id_thresh=0.35, n_jobs=None,local_enabled=False):
     query_str = str(query_seq.seq).upper()
     if n_jobs is None:
         n_jobs = cpu_count()
 
-    args_list = [(query_str, rec, win, id_thresh, args.local_enabled) for rec in db_records]
+    args_list = [(query_str, rec, win, id_thresh, local_enabled) for rec in db_records]
 
     print(f"💻 Using {n_jobs} processes, total candidates: {len(db_records)}")
     results = []
@@ -136,6 +137,77 @@ def dedup_by_os(results):
         if os_name not in os_best or r["score"] > os_best[os_name]["score"]:
             os_best[os_name] = r
     return list(os_best.values())
+
+def search_cross_allergen(allergen_name,query_fasta_dir="./fasta_files",db_fasta="naive/uniprotkb_allergen_2025_07_22.fasta", k=5, cpu=None, local_enabled=False):
+    db_records = list(SeqIO.parse(db_fasta, "fasta"))
+
+    query_files = [os.path.join(query_fasta_dir, f) for f in os.listdir(query_fasta_dir)
+                   if f.lower().endswith(('.fasta', '.fa'))]    # filter, list generator
+
+    print(f"🔎 发现 {len(query_files)} 条待测序列文件")
+
+    all_results = []
+    total_start = time.time()
+
+    for idx, qfile in enumerate(query_files, 1):
+        query_seq = SeqIO.read(qfile, "fasta")
+        print(f"\n[{idx}/{len(query_files)}] 处理序列: {query_seq.id} ({qfile})")
+
+        start = time.time()
+        results = check_cross_parallel(query_seq, db_records,  win=80, id_thresh=0.35, n_jobs=cpu,local_enabled=local_enabled)
+        end = time.time()
+
+        if results:
+            results = dedup_by_os(results)
+            results.sort(key=lambda x: x["score"], reverse=True)    # key: input=each item in the list, output: value(int, float, str)
+            for r in results:
+                r['query_id'] = query_seq.id  # 标记是哪个query的结果
+            all_results.extend(results)
+            print(f"  ✔️ 找到 {len(results)} 个潜在交叉过敏原，耗时 {round(end-start, 2)} s")
+        else:
+            print("  ⚠️ 未发现潜在交叉过敏原")
+
+    total_end = time.time()
+
+    if not all_results:
+        print("\n❌ 全部序列均未发现潜在交叉过敏原")
+        return
+
+    # 汇总结果写文件，按 query_id + score 排序
+    all_results.sort(key=lambda x: (x['query_id'], -x['score']))
+
+    with open(f'result_cache/{allergen_name}.txt', 'w', encoding='utf-8') as f:
+        current_query = None
+        for i, r in enumerate(all_results, 1):
+            if r['query_id'] != current_query:
+                current_query = r['query_id']
+                f.write(f"\n\n==== Query: {current_query} ====\n")
+
+            f.write(f"{i}. {r['id']}\n"
+                    f"   📛 名称: {r['description']}\n"
+                    f"   🧬 Identity: {r['identity']:.3f}\n"
+                    f"   🔗 Has 6-mer match: {r['has_6mer']}\n"
+                    f"   📊 综合得分: {r['score']:.3f}\n"
+                    f"   🔍 匹配模式: {r['match_mode']}\n")
+
+    print(f"\n🎉 所有查询序列处理完成，结果保存在: output_all_queries.txt")
+    print(f"总耗时: {round(total_end - total_start, 2)} 秒")
+
+
+    content = {}
+    keys = all_results[0].keys()
+    for key in keys:
+        content[key] = []
+
+    for item in all_results:
+        for key in keys:
+            content[key].append(item[key])
+
+    df = pd.DataFrame(content)
+
+    return df
+
+
 
 
 def main():
