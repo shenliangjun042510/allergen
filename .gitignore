@@ -1,4 +1,6 @@
 __pycache__/
-*_cache/
 *.fasta
 *.png
+species_cache/
+result_cache/
+fasta_files/

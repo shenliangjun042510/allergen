@@ -1,0 +1,7 @@
+biopython
+streamlit
+numpy
+matplotlib
+scikit-learn
+requests
+bs4
