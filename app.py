@@ -6,38 +6,15 @@ import re
 import os
 from collections import defaultdict
 import random
+
+import requests
+from bs4 import BeautifulSoup
+
+from parser import get_uniprot_id_from_detail_page
+
 from io import StringIO
 
-from parser import search_allergen_org_with_real_uniprot
-from cross_allergen import search_cross_allergen
-
-
-# ========== 模拟预测函数 ==========
-def simulate_prediction(input_species: str, delay_sec=3) -> pd.DataFrame:
-    """模拟一个预测函数，延迟几秒后返回伪造数据"""
-    time.sleep(delay_sec)  # 模拟长时间计算
-
-    mock_species = [
-        "Pistacia vera", "Corylus avellana", "Juglans regia",
-        "Glycine max", "Oryza sativa", "Triticum aestivum",
-        "Solanum lycopersicum", "Malus domestica", "Quercus suber"
-    ]
-    random.shuffle(mock_species)
-
-    n = random.randint(5, 9)
-    df = pd.DataFrame({
-        "species": mock_species[:n],
-        "max_score": [round(random.uniform(0.35, 0.95), 3) for _ in range(n)],
-        "avg_score": [round(random.uniform(0.3, 0.9), 3) for _ in range(n)],
-        "hits": [random.randint(1, 5) for _ in range(n)]
-    })
-
-    # 添加属名和是否为本属
-    input_genus = input_species.strip().split()[0]
-    df["genus"] = df["species"].apply(lambda x: x.split()[0])
-    df["related_to_input"] = df["genus"].str.lower() == input_genus.lower()
-    return df
-
+from st_func import *
 
 @st.cache_data
 def load_results(file_path="output.txt"):
@@ -92,7 +69,7 @@ def parse_allergen_text(path: str) -> pd.DataFrame:
             "id": None,
             "name": None,
             "identity": None,
-            "has_6mer_match": None,
+            "has_8mer_match": None,
             "score": None,
             "mode": None
         }
@@ -111,7 +88,7 @@ def parse_allergen_text(path: str) -> pd.DataFrame:
             elif line.startswith("🔗"):
                 match = re.search(r"Has 6-mer match:\s*(True|False)", line)
                 if match:
-                    record["has_6mer_match"] = match.group(1) == "True"
+                    record["has_8mer_match"] = match.group(1) == "True"
             elif line.startswith("📊"):
                 match = re.search(r"综合得分:\s*([\d.]+)", line)
                 if match:
@@ -168,38 +145,57 @@ st.markdown(
 )
 
 input_species = st.text_input("🔍 输入物种名称（例如 peanut, shrimp, soy）：", value="peanut")
+print(f"input species: {input_species}")
 top_n = st.slider("🔢 显示 Top-N 结果", 5, 20, 10)
 
 predict_button = st.button("🚀 开始预测")
 
+# ========== 主流程 ==========
 if predict_button:
+    # 1. 搜索并保存该物种的过敏原
+    os.makedirs("species_cache", exist_ok=True)
+    allergen_csv_path = f"species_cache/{input_species}_allergens.csv"
+
+    # 1. 优先从 cache 读取物种过敏原
+    if os.path.exists(allergen_csv_path):
+        allergen_df = pd.read_csv(allergen_csv_path)
+    else:
+        st.info(f"🔍 正在搜索 {input_species} 的过敏原...")
+        allergens = search_allergen_org_with_real_uniprot_st(input_species)
+        allergen_df = pd.DataFrame(allergens)
+        allergen_df.to_csv(allergen_csv_path, index=False, encoding="utf-8")
+
+    # 展示过敏原列表
+    st.subheader(f"📋 {input_species} 的过敏原列表")
+    st.dataframe(allergen_df,height=200)
+
+    # 下载按钮
+    csv_data = allergen_df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        label="📥 下载该物种过敏原列表（CSV）",
+        data=csv_data,
+        file_name=f"{input_species}_allergens.csv",
+        mime="text/csv"
+    )
+
+    # 2. 交叉过敏原预测
     if os.path.exists(f"result_cache/{input_species}.txt"):
         df = parse_allergen_text(f"result_cache/{input_species}.txt")
     else:
-        results = search_allergen_org_with_real_uniprot(input_species)
-        # context handler
         with st.spinner("🧠 正在预测可能的交叉过敏原物种，请稍候..."):
-            df = search_cross_allergen(allergen_name="input_species")
+            df = predict_cross_allergen_streamlit(species_name=input_species)
             df = df.sort_values(by="score", ascending=False).reset_index(drop=True)
 
-            # df = simulate_prediction(input_species, delay_sec=3)
-            # df = df.sort_values(by="max_score", ascending=False).reset_index(drop=True)
-
-    st.success("✅ 预测完成！以下是结果：")
-
-    st.subheader("📋 Top-N 预测结果")
-    top_df = df.head(top_n)
-    # st.dataframe(top_df.style.applymap(
-    #     lambda v: "background-color: #ffd8d8" if isinstance(v, bool) and v else "",
-    #     subset=["related_to_input"]
-    # ))
-    st.dataframe(top_df)
+    # 展示过敏原列表
+    st.subheader(f"📋 {input_species} 的交叉过敏原预测结果")
+    st.dataframe(df,height=200)
 
     # 下载按钮
     csv_data = df.to_csv(index=False).encode("utf-8")
     st.download_button(
-        label="📥 下载全部预测结果（CSV）",
+        label="📥 下载结果 CSV",
         data=csv_data,
-        file_name=f"{input_species}_prediction.csv",
+        file_name=f"{input_species}_cross_allergen_results.csv",
         mime="text/csv"
     )
+
